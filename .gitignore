@@ -1,0 +1,25 @@
+# Backup files
+*.backup.*
+*.bak
+*.orig
+
+# Temporary files
+*.tmp
+*.temp
+*~
+
+# Log files
+*.log
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test_output/
