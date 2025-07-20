@@ -44,11 +44,12 @@ sub LEDController_UpdateReadingsFromWebSocket($$);
 sub LEDController_GetFieldStructure($);
 sub LEDController_BuildDynamicCommands($);
 sub LEDController_ValidateFieldValue($$$);
-sub LEDController_FormatFieldValue($$);
+sub LEDController_FormatFieldValue($$$);
 sub LEDController_ParseFieldStructure($$);
 sub LEDController_BuildFHEMControls($);
 sub LEDController_BuildWebCmd($);
 sub LEDController_BuildCommandWidget($$);
+sub LEDController_MakeReadingName($);
 
 ##############################################################################
 # Initialize
@@ -98,6 +99,7 @@ sub LEDController_Define($$) {
     $hash->{FIELD_STRUCTURE} = {};
     $hash->{FIELD_SECTIONS} = [];
     $hash->{DYNAMIC_COMMANDS} = {};
+    $hash->{OPTION_MAPPING} = {};
     
     # Set default attributes
     $attr{$name}{interval} = 30 if(!defined($attr{$name}{interval}));
@@ -204,7 +206,7 @@ sub LEDController_Set($@) {
     return $validationResult if($validationResult);
     
     # Format value for the LED controller
-    my $formattedValue = LEDController_FormatFieldValue($fieldInfo, $value);
+    my $formattedValue = LEDController_FormatFieldValue($hash, $fieldInfo, $value);
     
     # Send command using /set endpoint with query parameters
     my $url = "/set?" . $fieldInfo->{name} . "=" . $formattedValue;
@@ -557,8 +559,8 @@ sub LEDController_ValidateFieldValue($$$) {
 ##############################################################################
 # Format Field Value for LED Controller
 ##############################################################################
-sub LEDController_FormatFieldValue($$) {
-    my ($fieldInfo, $value) = @_;
+sub LEDController_FormatFieldValue($$$) {
+    my ($hash, $fieldInfo, $value) = @_;
     
     my $fieldType = $fieldInfo->{type};
     my $fieldName = $fieldInfo->{name};
@@ -572,6 +574,18 @@ sub LEDController_FormatFieldValue($$) {
         
         return 1 if(!defined($value) || $value eq "on" || $value eq "1");
         return 0;
+    }
+    elsif($fieldType == SelectFieldType) {
+        # For select fields, check if we have an option mapping
+        # and convert the reading name back to the index
+        if(defined($hash->{OPTION_MAPPING}) && defined($hash->{OPTION_MAPPING}->{$fieldName})) {
+            my $mapping = $hash->{OPTION_MAPPING}->{$fieldName};
+            if(defined($mapping->{$value})) {
+                return $mapping->{$value};
+            }
+        }
+        # If no mapping found, try to use value as-is (might be a direct index)
+        return $value;
     }
     elsif($fieldType == ColorFieldType) {
         # Convert hex color to decimal
@@ -981,19 +995,20 @@ sub LEDController_BuildWebCmd($) {
             
             # If options are available, use them
             if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
+                # Store option name to index mapping in hash
+                my %optionMapping = ();
                 for my $i (0..$#{$field->{options}}) {
                     my $option = $field->{options}->[$i];
-                    # Quote option if it contains spaces
-                    if($option =~ /\s/) {
-                        push @options, "$i,\"$option\"";
-                    } else {
-                        push @options, "$i,$option";
-                    }
+                    my $readingName = LEDController_MakeReadingName($option);
+                    $optionMapping{$readingName} = $i;
+                    push @options, $readingName;
                 }
+                # Store mapping for later use
+                $hash->{OPTION_MAPPING}->{$fieldName} = \%optionMapping;
             } else {
                 # Generate numbered options
                 for my $i (0..$max) {
-                    push @options, "$i,Option$i";
+                    push @options, "Option$i";
                 }
             }
             
@@ -1035,17 +1050,11 @@ sub LEDController_BuildCommandWidget($$) {
     elsif($fieldType == SelectFieldType) {
         if(defined($fieldInfo->{options}) && ref($fieldInfo->{options}) eq 'ARRAY') {
             my @options = @{$fieldInfo->{options}};
-            # Build value,label pairs for proper select dropdown functionality
-            # This ensures the actual reading shows the label name even when value is transmitted as index
+            # Convert options to reading names for the widget
             my @processedOptions = ();
-            for my $i (0 .. $#options) {
-                my $option = $options[$i];
-                # Quote option label if it contains spaces
-                if($option =~ /\s/) {
-                    push @processedOptions, "$i,\"$option\"";
-                } else {
-                    push @processedOptions, "$i,$option";
-                }
+            for my $option (@options) {
+                my $readingName = LEDController_MakeReadingName($option);
+                push @processedOptions, $readingName;
             }
             return "$cmdName:selectnumbers," . join(",", @processedOptions);
         }
@@ -1056,6 +1065,30 @@ sub LEDController_BuildCommandWidget($$) {
     
     # Default: return command name without widget
     return $cmdName;
+}
+
+##############################################################################
+# Make Reading Name - Convert option names to valid reading names
+##############################################################################
+sub LEDController_MakeReadingName($) {
+    my ($option) = @_;
+    
+    # Convert to valid reading name by replacing/removing problematic characters
+    my $readingName = $option;
+    
+    # Replace spaces with underscores
+    $readingName =~ s/\s+/_/g;
+    
+    # Remove or replace other problematic characters
+    $readingName =~ s/[^\w\-]//g;
+    
+    # Ensure it doesn't start with a number or special character
+    $readingName =~ s/^[^a-zA-Z]/opt_$&/;
+    
+    # If empty after cleaning, provide a default
+    $readingName = "option" if $readingName eq "";
+    
+    return $readingName;
 }
 
 1;
