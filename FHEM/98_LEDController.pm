@@ -1029,13 +1029,17 @@ sub LEDController_BuildCommandWidget($$) {
     elsif($fieldType == SelectFieldType) {
         if(defined($fieldInfo->{options}) && ref($fieldInfo->{options}) eq 'ARRAY') {
             my @options = @{$fieldInfo->{options}};
-            # Handle whitespace properly by quoting options that contain spaces
+            # Build value,label pairs for proper select dropdown functionality
+            # This ensures the actual reading shows the label name even when value is transmitted as index
             my @processedOptions = ();
             for my $i (0 .. $#options) {
                 my $option = $options[$i];
-                # Quote option if it contains spaces
-                $option = '"' . $option . '"' if $option =~ /\s/;
-                push @processedOptions, $option;
+                # Quote option label if it contains spaces
+                if($option =~ /\s/) {
+                    push @processedOptions, "$i,\"$option\"";
+                } else {
+                    push @processedOptions, "$i,$option";
+                }
             }
             return "$cmdName:selectnumbers," . join(",", @processedOptions);
         }
