@@ -48,7 +48,7 @@ sub LEDController_FormatFieldValue($$);
 sub LEDController_ParseFieldStructure($$);
 sub LEDController_BuildFHEMControls($);
 sub LEDController_BuildWebCmd($);
-sub LEDController_BuildWidgetOverrides($);
+sub LEDController_BuildCommandWidget($$);
 
 ##############################################################################
 # Initialize
@@ -158,7 +158,27 @@ sub LEDController_Set($@) {
         my $helpText = "Unknown argument $cmd, choose one of ";
         
         if(keys %{$hash->{DYNAMIC_COMMANDS}} > 0) {
-            $helpText .= join(" ", sort keys %{$hash->{DYNAMIC_COMMANDS}});
+            my @commands = ("refresh");
+            
+            # Add dynamic commands with widget information
+            foreach my $cmdName (sort keys %{$hash->{DYNAMIC_COMMANDS}}) {
+                my $fieldInfo = $hash->{DYNAMIC_COMMANDS}->{$cmdName};
+                my $fieldType = $fieldInfo->{type};
+                
+                # Special handling for power field - add on/off commands
+                if($fieldType == BooleanFieldType && $fieldInfo->{name} eq "power") {
+                    # Skip the power command itself, on/off are already in DYNAMIC_COMMANDS
+                    next if $cmdName eq "power";
+                }
+                
+                # Build widget definition for this command
+                my $widgetDef = LEDController_BuildCommandWidget($fieldInfo, $cmdName);
+                if($widgetDef) {  # Only add if not empty
+                    push @commands, $widgetDef;
+                }
+            }
+            
+            $helpText .= join(" ", @commands);
         } else {
             $helpText .= "refresh";
         }
@@ -906,17 +926,8 @@ sub LEDController_BuildFHEMControls($) {
         }
     }
     
-    # Build widgetOverride attribute  
-    my $widgetOverrides = LEDController_BuildWidgetOverrides($hash);
-    if($widgetOverrides) {
-        # Use CommandAttr to properly set attributes through FHEM's validation
-        my $widgetRet = CommandAttr(undef, "$name widgetOverride $widgetOverrides");
-        if($widgetRet) {
-            Log3 $name, 2, "LEDController ($name) - error setting widgetOverride: $widgetRet";
-        } else {
-            Log3 $name, 4, "LEDController ($name) - set widgetOverride: $widgetOverrides";
-        }
-    }
+    # Note: Widget definitions are now attached directly to commands in the Set function
+    # instead of using widgetOverride attributes (which are for end-users)
     
     Log3 $name, 3, "LEDController ($name) - FHEM control elements built successfully";
 }
@@ -993,55 +1004,48 @@ sub LEDController_BuildWebCmd($) {
 }
 
 ##############################################################################
-# Build WidgetOverride Attribute
+# Build Command Widget Definition
 ##############################################################################
-sub LEDController_BuildWidgetOverrides($) {
-    my ($hash) = @_;
-    my $name = $hash->{NAME};
+sub LEDController_BuildCommandWidget($$) {
+    my ($fieldInfo, $cmdName) = @_;
+    my $fieldType = $fieldInfo->{type};
     
-    my @overrides = ();
-    
-    # Process fields for widget overrides
-    foreach my $fieldName (sort keys %{$hash->{FIELD_STRUCTURE}}) {
-        my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
-        my $fieldType = $field->{type};
-        
-        # Skip non-settable fields
-        next if(!defined($fieldType));
-        next if($fieldType == TitleFieldType || $fieldType == SectionFieldType);
-        
-        # Convert field name to command name  
-        my $cmdName = $fieldName;
-        $cmdName =~ s/([a-z])([A-Z])/$1_$2/g;
-        $cmdName = lc($cmdName);
-        
-        # Add widget overrides based on field type
-        if($fieldType == NumberFieldType) {
-            my $min = $field->{min} || 0;
-            my $max = $field->{max} || 255;
-            my $label = $field->{label} || $fieldName;
-            
-            push @overrides, "$cmdName:slider,$min,$max,1";
-        }
-        elsif($fieldType == BooleanFieldType && $fieldName ne "power") {
-            my $label = $field->{label} || $fieldName;
-            push @overrides, "$cmdName:uzsuToggle,off,on";
-        }
-        elsif($fieldType == SelectFieldType) {
-            my $label = $field->{label} || $fieldName;
-            if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
-                my @options = @{$field->{options}};
-                push @overrides, "$cmdName:selectnumbers," . join(",", @options);
-            }
-        }
-        elsif($fieldType == ColorFieldType) {
-            my $label = $field->{label} || $fieldName;
-            push @overrides, "$cmdName:colorpicker";
+    # For boolean fields, handle special cases
+    if($fieldType == BooleanFieldType) {
+        if($fieldInfo->{name} eq "power") {
+            # Power field: on/off commands are simple commands without widgets
+            return $cmdName;  # Return simple command name (on/off)
+        } else {
+            # Other boolean fields get toggle widget
+            return "$cmdName:uzsuToggle,off,on";
         }
     }
+    elsif($fieldType == NumberFieldType) {
+        my $min = $fieldInfo->{min} || 0;
+        my $max = $fieldInfo->{max} || 255;
+        my $step = 1;
+        return "$cmdName:slider,$min,$step,$max";
+    }
+    elsif($fieldType == SelectFieldType) {
+        if(defined($fieldInfo->{options}) && ref($fieldInfo->{options}) eq 'ARRAY') {
+            my @options = @{$fieldInfo->{options}};
+            # Handle whitespace properly by quoting options that contain spaces
+            my @processedOptions = ();
+            for my $i (0 .. $#options) {
+                my $option = $options[$i];
+                # Quote option if it contains spaces
+                $option = '"' . $option . '"' if $option =~ /\s/;
+                push @processedOptions, $option;
+            }
+            return "$cmdName:selectnumbers," . join(",", @processedOptions);
+        }
+    }
+    elsif($fieldType == ColorFieldType) {
+        return "$cmdName:colorpicker";
+    }
     
-    return join(" ", @overrides) if @overrides;
-    return "";
+    # Default: return command name without widget
+    return $cmdName;
 }
 
 1;
