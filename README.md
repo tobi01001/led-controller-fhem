@@ -5,6 +5,13 @@ This module provides FHEM integration for the [LED_Stripe_Dynamic_web_conf](http
 ## Features
 
 - **Dynamic Command Generation**: Automatically discovers device capabilities and generates appropriate FHEM commands
+- **FHEM Control Elements**: Automatically generates webCmd and widgetOverride attributes for UI controls:
+  - NumberFieldType → sliders with proper min/max ranges
+  - BooleanFieldType → on/off toggle controls  
+  - SelectFieldType → dropdown lists with field option names
+  - ColorFieldType → color picker controls
+- **Power State Indication**: FHEM state reading reflects actual power state (on/off)
+- **WebSocket Connection Status**: Real-time connection status reading (connected/disconnected/failed)
 - **Proper API Integration**: Uses the actual `/set` endpoint with query parameters, not fake REST endpoints
 - **Section-Based Organization**: Matches the web interface structure with organized field sections
 - **Field Type Validation**: Automatic validation based on field types (Number, Boolean, Select, Color)
@@ -17,8 +24,9 @@ Unlike traditional FHEM modules with hardcoded commands, this module:
 
 1. **Discovers Device Structure**: Connects to `/all` endpoint to get field definitions
 2. **Builds Dynamic Commands**: Creates FHEM commands based on available fields
-3. **Validates Parameters**: Uses field metadata (min/max, types) for validation
-4. **Uses Real API**: Sends commands to `/set` endpoint with proper query parameters
+3. **Generates Control Elements**: Automatically creates webCmd and widgetOverride attributes for proper UI controls
+4. **Validates Parameters**: Uses field metadata (min/max, types) for validation
+5. **Uses Real API**: Sends commands to `/set` endpoint with proper query parameters
 
 ## Installation
 
@@ -37,6 +45,8 @@ The module will automatically:
 - Connect to the device
 - Discover available fields and their properties
 - Build appropriate FHEM commands
+- Generate webCmd attributes for UI controls (sliders, toggles, dropdowns, color pickers)
+- Generate widgetOverride attributes for enhanced control appearance
 - Start regular status updates
 
 ### Control the LED stripe
@@ -94,6 +104,8 @@ get myLED palettes
 - `disable` - Disable device (0/1, default: 0)
 - `websocket` - Enable WebSocket connection for real-time updates (0/1, default: 0)
 - `sections` - Comma-separated list of sections to show (optional)
+- `webCmd` - Generated automatically based on field types for UI controls
+- `widgetOverride` - Generated automatically for enhanced control appearance
 
 ### Example FHEM configuration
 
@@ -175,6 +187,34 @@ Commands are translated to proper API calls:
 - `set myLED brightness 128` → `GET /set?brightness=128`
 - `set myLED solid_color FF0000` → `GET /set?solidColor=solidColor&r=255&g=0&b=0`
 - `set myLED effect 5` → `GET /set?effect=5`
+
+## FHEM Control Elements
+
+The module automatically generates appropriate FHEM control elements based on the field types discovered from the device:
+
+### webCmd Generation
+
+The `webCmd` attribute is automatically built with controls matching each field type:
+
+- **NumberFieldType** → `field:slider,min,1,max` (e.g., `brightness:slider,0,1,255`)
+- **BooleanFieldType** → `field:on,off` (e.g., `auto_play:on,off`) 
+- **SelectFieldType** → `field:0,Option1,1,Option2,...` (e.g., `effect:0,Static,1,Rainbow,2,Fire`)
+- **ColorFieldType** → `field:colorpicker,RGB` (e.g., `solid_color:colorpicker,RGB`)
+- **Power Field** → Special case: generates separate `on` and `off` commands
+
+### widgetOverride Generation
+
+The `widgetOverride` attribute provides enhanced control appearance:
+
+- **NumberFieldType** → `field:slider,min,max,1` for smooth slider controls
+- **BooleanFieldType** → `field:uzsuToggle,off,on` for toggle switches
+- **SelectFieldType** → `field:selectnumbers,Option1,Option2,...` for dropdown lists
+- **ColorFieldType** → `field:colorpicker` for color selection
+
+### Status Readings
+
+- **power** reading automatically updates the FHEM `state` to "on" or "off"
+- **websocket_connection** reading shows WebSocket status: "connected", "disconnected", "connecting", or "failed"
 
 ## WebSocket Support
 

@@ -46,6 +46,9 @@ sub LEDController_BuildDynamicCommands($);
 sub LEDController_ValidateFieldValue($$$);
 sub LEDController_FormatFieldValue($$);
 sub LEDController_ParseFieldStructure($$);
+sub LEDController_BuildFHEMControls($);
+sub LEDController_BuildWebCmd($);
+sub LEDController_BuildWidgetOverrides($);
 
 ##############################################################################
 # Initialize
@@ -257,6 +260,7 @@ sub LEDController_Attr(@) {
             } elsif($attrVal == 0 && defined($hash->{WEBSOCKET})) {
                 close($hash->{WEBSOCKET});
                 delete $hash->{WEBSOCKET};
+                readingsSingleUpdate($hash, "websocket_connection", "disconnected", 1);
             }
         }
     }
@@ -443,6 +447,9 @@ sub LEDController_ParseFieldStructure($$) {
     # Build dynamic commands
     LEDController_BuildDynamicCommands($hash);
     
+    # Build FHEM control elements
+    LEDController_BuildFHEMControls($hash);
+    
     # Start regular status updates
     $hash->{STATE} = "active";
     InternalTimer(gettimeofday() + 5, "LEDController_GetStatus", $hash, 0);
@@ -599,6 +606,12 @@ sub LEDController_UpdateAllReadings($$) {
             }
             
             readingsBulkUpdate($hash, $readingName, $readingValue);
+            
+            # Update STATE based on power reading
+            if($readingName eq "power") {
+                my $state = $readingValue eq "on" ? "on" : "off";
+                readingsBulkUpdate($hash, "state", $state);
+            }
         }
     }
     
@@ -632,6 +645,12 @@ sub LEDController_UpdateReadingsFromJSON($$) {
         }
         
         readingsBulkUpdate($hash, $key, $value);
+        
+        # Update STATE based on power reading
+        if($key eq "power") {
+            my $state = $value eq "on" ? "on" : "off";
+            readingsBulkUpdate($hash, "state", $state);
+        }
     }
 }
 
@@ -645,6 +664,9 @@ sub LEDController_ConnectWebSocket($) {
     my $port = $hash->{PORT};
     
     Log3 $name, 3, "LEDController ($name) - connecting WebSocket to $host:$port";
+    
+    # Set WebSocket connection status to connecting
+    readingsSingleUpdate($hash, "websocket_connection", "connecting", 1);
     
     # Basic WebSocket implementation using IO::Socket::INET
     # This assumes the LED controller provides a WebSocket endpoint on /ws
@@ -671,6 +693,7 @@ sub LEDController_ConnectWebSocket($) {
             my $response = <$socket>;
             if($response && $response =~ /HTTP\/1\.1 101/) {
                 $hash->{WEBSOCKET} = $socket;
+                readingsSingleUpdate($hash, "websocket_connection", "connected", 1);
                 Log3 $name, 3, "LEDController ($name) - WebSocket connected successfully";
                 
                 # Set non-blocking mode for receiving updates
@@ -679,15 +702,18 @@ sub LEDController_ConnectWebSocket($) {
                 # Start WebSocket reader
                 InternalTimer(gettimeofday() + 1, "LEDController_ReadWebSocket", $hash, 0);
             } else {
+                readingsSingleUpdate($hash, "websocket_connection", "failed", 1);
                 Log3 $name, 2, "LEDController ($name) - WebSocket handshake failed";
                 close($socket);
             }
         } else {
+            readingsSingleUpdate($hash, "websocket_connection", "failed", 1);
             Log3 $name, 2, "LEDController ($name) - Could not connect to WebSocket: $!";
         }
     };
     
     if($@) {
+        readingsSingleUpdate($hash, "websocket_connection", "failed", 1);
         Log3 $name, 2, "LEDController ($name) - WebSocket connection error: $@";
     }
     
@@ -725,6 +751,7 @@ sub LEDController_ReadWebSocket($) {
         }
     } elsif(!defined($bytes_read) && $! != EAGAIN && $! != EWOULDBLOCK) {
         # Connection lost
+        readingsSingleUpdate($hash, "websocket_connection", "disconnected", 1);
         Log3 $name, 2, "LEDController ($name) - WebSocket connection lost";
         close($hash->{WEBSOCKET});
         delete $hash->{WEBSOCKET};
@@ -842,6 +869,12 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
         }
         
         readingsBulkUpdate($hash, $fieldName, $fieldValue);
+        
+        # Update STATE based on power reading
+        if($fieldName eq "power") {
+            my $state = $fieldValue eq "on" ? "on" : "off";
+            readingsBulkUpdate($hash, "state", $state);
+        }
     }
     else {
         # Handle other JSON structures
@@ -850,6 +883,155 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
     
     readingsBulkUpdate($hash, "last_websocket_update", time());
     readingsEndUpdate($hash, 1);
+}
+
+##############################################################################
+# Build FHEM Control Elements 
+##############################################################################
+sub LEDController_BuildFHEMControls($) {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+    
+    Log3 $name, 3, "LEDController ($name) - building FHEM control elements";
+    
+    # Build webCmd attribute
+    my $webCmd = LEDController_BuildWebCmd($hash);
+    if($webCmd) {
+        $attr{$name}{webCmd} = $webCmd;
+        Log3 $name, 4, "LEDController ($name) - set webCmd: $webCmd";
+    }
+    
+    # Build widgetOverride attribute  
+    my $widgetOverrides = LEDController_BuildWidgetOverrides($hash);
+    if($widgetOverrides) {
+        $attr{$name}{widgetOverride} = $widgetOverrides;
+        Log3 $name, 4, "LEDController ($name) - set widgetOverride: $widgetOverrides";
+    }
+    
+    Log3 $name, 3, "LEDController ($name) - FHEM control elements built successfully";
+}
+
+##############################################################################
+# Build WebCmd Attribute
+##############################################################################
+sub LEDController_BuildWebCmd($) {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+    
+    my @webCmds = ();
+    
+    # Always add refresh command
+    push @webCmds, "refresh";
+    
+    # Process fields in a predictable order
+    my @sortedFields = sort keys %{$hash->{FIELD_STRUCTURE}};
+    
+    foreach my $fieldName (@sortedFields) {
+        my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
+        my $fieldType = $field->{type};
+        
+        # Skip non-settable fields
+        next if(!defined($fieldType));
+        next if($fieldType == TitleFieldType || $fieldType == SectionFieldType);
+        
+        # Convert field name to command name
+        my $cmdName = $fieldName;
+        $cmdName =~ s/([a-z])([A-Z])/$1_$2/g;
+        $cmdName = lc($cmdName);
+        
+        # Build command based on field type
+        if($fieldType == BooleanFieldType) {
+            if($fieldName eq "power") {
+                # Special case for power: add on/off commands
+                push @webCmds, "on", "off";
+            } else {
+                # For other boolean fields, add the field with on/off options
+                push @webCmds, "$cmdName:on,off";
+            }
+        }
+        elsif($fieldType == NumberFieldType) {
+            my $min = $field->{min} || 0;
+            my $max = $field->{max} || 255;
+            push @webCmds, "$cmdName:slider,$min,1,$max";
+        }
+        elsif($fieldType == SelectFieldType) {
+            my $max = $field->{max} || 0;
+            my @options = ();
+            
+            # If options are available, use them
+            if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
+                for my $i (0..$#{$field->{options}}) {
+                    push @options, "$i," . $field->{options}->[$i];
+                }
+            } else {
+                # Generate numbered options
+                for my $i (0..$max) {
+                    push @options, "$i,Option$i";
+                }
+            }
+            
+            if(@options > 0) {
+                push @webCmds, "$cmdName:" . join(",", @options);
+            }
+        }
+        elsif($fieldType == ColorFieldType) {
+            push @webCmds, "$cmdName:colorpicker,RGB";
+        }
+    }
+    
+    return join(" ", @webCmds);
+}
+
+##############################################################################
+# Build WidgetOverride Attribute
+##############################################################################
+sub LEDController_BuildWidgetOverrides($) {
+    my ($hash) = @_;
+    my $name = $hash->{NAME};
+    
+    my @overrides = ();
+    
+    # Process fields for widget overrides
+    foreach my $fieldName (sort keys %{$hash->{FIELD_STRUCTURE}}) {
+        my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
+        my $fieldType = $field->{type};
+        
+        # Skip non-settable fields
+        next if(!defined($fieldType));
+        next if($fieldType == TitleFieldType || $fieldType == SectionFieldType);
+        
+        # Convert field name to command name  
+        my $cmdName = $fieldName;
+        $cmdName =~ s/([a-z])([A-Z])/$1_$2/g;
+        $cmdName = lc($cmdName);
+        
+        # Add widget overrides based on field type
+        if($fieldType == NumberFieldType) {
+            my $min = $field->{min} || 0;
+            my $max = $field->{max} || 255;
+            my $label = $field->{label} || $fieldName;
+            
+            push @overrides, "$cmdName:slider,$min,$max,1";
+        }
+        elsif($fieldType == BooleanFieldType && $fieldName ne "power") {
+            my $label = $field->{label} || $fieldName;
+            push @overrides, "$cmdName:uzsuToggle,off,on";
+        }
+        elsif($fieldType == SelectFieldType) {
+            my $label = $field->{label} || $fieldName;
+            if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
+                my @options = @{$field->{options}};
+                push @overrides, "$cmdName:selectnumbers," . join(",", @options);
+            }
+        }
+        elsif($fieldType == ColorFieldType) {
+            my $label = $field->{label} || $fieldName;
+            push @overrides, "$cmdName:colorpicker";
+        }
+    }
+    
+    return join(" ", @overrides) if @overrides;
+    return "";
 }
 
 1;
