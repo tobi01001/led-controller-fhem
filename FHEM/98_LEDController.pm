@@ -897,15 +897,25 @@ sub LEDController_BuildFHEMControls($) {
     # Build webCmd attribute
     my $webCmd = LEDController_BuildWebCmd($hash);
     if($webCmd) {
-        $attr{$name}{webCmd} = $webCmd;
-        Log3 $name, 4, "LEDController ($name) - set webCmd: $webCmd";
+        # Use CommandAttr to properly set attributes through FHEM's validation
+        my $ret = CommandAttr(undef, "$name webCmd $webCmd");
+        if($ret) {
+            Log3 $name, 2, "LEDController ($name) - error setting webCmd: $ret";
+        } else {
+            Log3 $name, 4, "LEDController ($name) - set webCmd: $webCmd";
+        }
     }
     
     # Build widgetOverride attribute  
     my $widgetOverrides = LEDController_BuildWidgetOverrides($hash);
     if($widgetOverrides) {
-        $attr{$name}{widgetOverride} = $widgetOverrides;
-        Log3 $name, 4, "LEDController ($name) - set widgetOverride: $widgetOverrides";
+        # Use CommandAttr to properly set attributes through FHEM's validation
+        my $ret = CommandAttr(undef, "$name widgetOverride $widgetOverrides");
+        if($ret) {
+            Log3 $name, 2, "LEDController ($name) - error setting widgetOverride: $ret";
+        } else {
+            Log3 $name, 4, "LEDController ($name) - set widgetOverride: $widgetOverrides";
+        }
     }
     
     Log3 $name, 3, "LEDController ($name) - FHEM control elements built successfully";
