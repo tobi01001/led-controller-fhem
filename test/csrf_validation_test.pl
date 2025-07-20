@@ -48,7 +48,7 @@ sub LEDController_BuildWebCmd($) {
     my @webCmds = ();
     push @webCmds, "refresh";
     
-    my @sortedFields = sort keys %{$hash->{FIELD_STRUCTURE}};
+    my @sortedFields = sort { $a cmp $b } keys %{$hash->{FIELD_STRUCTURE}};
     
     foreach my $fieldName (@sortedFields) {
         my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
