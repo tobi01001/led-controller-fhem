@@ -910,9 +910,9 @@ sub LEDController_BuildFHEMControls($) {
     my $widgetOverrides = LEDController_BuildWidgetOverrides($hash);
     if($widgetOverrides) {
         # Use CommandAttr to properly set attributes through FHEM's validation
-        my $ret = CommandAttr(undef, "$name widgetOverride $widgetOverrides");
-        if($ret) {
-            Log3 $name, 2, "LEDController ($name) - error setting widgetOverride: $ret";
+        my $widgetRet = CommandAttr(undef, "$name widgetOverride $widgetOverrides");
+        if($widgetRet) {
+            Log3 $name, 2, "LEDController ($name) - error setting widgetOverride: $widgetRet";
         } else {
             Log3 $name, 4, "LEDController ($name) - set widgetOverride: $widgetOverrides";
         }
