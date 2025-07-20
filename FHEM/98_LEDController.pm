@@ -241,7 +241,7 @@ sub LEDController_Attr(@) {
     my $hash = $defs{$name};
     
     if($cmd eq "set") {
-        elsif($attrName eq "interval") {
+        if($attrName eq "interval") {
             return "interval must be a positive number" if($attrVal !~ /^\d+$/ || $attrVal < 1);
             # Restart timer with new interval
             RemoveInternalTimer($hash);
