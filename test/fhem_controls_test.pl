@@ -88,20 +88,23 @@ foreach my $cmd (@expectedWebCmds) {
     print "  - $cmd\n";
 }
 
-# Test widgetOverride generation  
-print "\n=== Testing widgetOverride Generation ===\n";
+# Test widgetOverride generation (REMOVED - modules should not use widgetOverride)
+print "\n=== Testing Widget Integration (NEW APPROACH) ===\n";
 
-my @expectedWidgetOverrides = (
+print "The module now attaches widgets directly to commands in Set function help text.\n";
+print "This is the correct FHEM approach instead of using widgetOverride attributes.\n\n";
+
+my @expectedWidgetFormats = (
     "auto_play:uzsuToggle,off,on",
-    "brightness:slider,0,255,1",
-    "effect:selectnumbers,Static,Ease,Rainbow,Fire,Twinkle,Random",
+    "brightness:slider,0,1,255",
+    "effect:selectnumbers,0,Static,1,Ease,2,Rainbow,3,Fire,4,Twinkle,5,Random",
     "solid_color:colorpicker",
-    "speed:slider,1,100,1"
+    "speed:slider,1,1,100"
 );
 
-print "Expected widgetOverride components:\n";
-foreach my $override (@expectedWidgetOverrides) {
-    print "  - $override\n";
+print "Expected widget formats in Set help:\n";
+foreach my $format (@expectedWidgetFormats) {
+    print "  - $format\n";
 }
 
 # Test WebSocket connection status values
@@ -173,7 +176,7 @@ foreach my $input (sort keys %commandConversions) {
 
 print "\n=== Test Summary ===\n";
 print "✓ webCmd generation components identified\n";
-print "✓ widgetOverride generation components identified\n";
+print "✓ Widget integration via Set help text identified\n";
 print "✓ WebSocket connection status values defined\n";
 print "✓ Power state reading mapping verified\n";
 print "✓ Field type constants verified\n";

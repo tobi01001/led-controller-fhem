@@ -982,7 +982,13 @@ sub LEDController_BuildWebCmd($) {
             # If options are available, use them
             if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
                 for my $i (0..$#{$field->{options}}) {
-                    push @options, "$i," . $field->{options}->[$i];
+                    my $option = $field->{options}->[$i];
+                    # Quote option if it contains spaces
+                    if($option =~ /\s/) {
+                        push @options, "$i,\"$option\"";
+                    } else {
+                        push @options, "$i,$option";
+                    }
                 }
             } else {
                 # Generate numbered options
