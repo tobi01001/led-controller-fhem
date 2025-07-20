@@ -5,7 +5,7 @@ This module provides FHEM integration for the [LED_Stripe_Dynamic_web_conf](http
 ## Features
 
 - **Dynamic Command Generation**: Automatically discovers device capabilities and generates appropriate FHEM commands
-- **FHEM Control Elements**: Automatically generates webCmd and widgetOverride attributes for UI controls:
+- **FHEM Control Elements**: Automatically integrates widget definitions directly into commands for UI controls:
   - NumberFieldType → sliders with proper min/max ranges
   - BooleanFieldType → on/off toggle controls  
   - SelectFieldType → dropdown lists with field option names
@@ -24,7 +24,7 @@ Unlike traditional FHEM modules with hardcoded commands, this module:
 
 1. **Discovers Device Structure**: Connects to `/all` endpoint to get field definitions
 2. **Builds Dynamic Commands**: Creates FHEM commands based on available fields
-3. **Generates Control Elements**: Automatically creates webCmd and widgetOverride attributes for proper UI controls
+3. **Generates Control Elements**: Automatically integrates widget definitions directly into commands for proper UI controls
 4. **Validates Parameters**: Uses field metadata (min/max, types) for validation
 5. **Uses Real API**: Sends commands to `/set` endpoint with proper query parameters
 
@@ -46,7 +46,7 @@ The module will automatically:
 - Discover available fields and their properties
 - Build appropriate FHEM commands
 - Generate webCmd attributes for UI controls (sliders, toggles, dropdowns, color pickers)
-- Generate widgetOverride attributes for enhanced control appearance
+- Integrate widget definitions directly into commands for enhanced UI controls
 - Start regular status updates
 
 ### Control the LED stripe
@@ -105,7 +105,7 @@ get myLED palettes
 - `websocket` - Enable WebSocket connection for real-time updates (0/1, default: 0)
 - `sections` - Comma-separated list of sections to show (optional)
 - `webCmd` - Generated automatically based on field types for UI controls
-- `widgetOverride` - Generated automatically for enhanced control appearance
+- Widget definitions are integrated directly into commands (following FHEM best practices)
 
 ### Example FHEM configuration
 
@@ -202,14 +202,17 @@ The `webCmd` attribute is automatically built with controls matching each field 
 - **ColorFieldType** → `field:colorpicker,RGB` (e.g., `solid_color:colorpicker,RGB`)
 - **Power Field** → Special case: generates separate `on` and `off` commands
 
-### widgetOverride Generation
+### Widget Integration
 
-The `widgetOverride` attribute provides enhanced control appearance:
+Widget definitions are integrated directly into commands following FHEM best practices:
 
-- **NumberFieldType** → `field:slider,min,max,1` for smooth slider controls
-- **BooleanFieldType** → `field:uzsuToggle,off,on` for toggle switches
-- **SelectFieldType** → `field:selectnumbers,Option1,Option2,...` for dropdown lists
-- **ColorFieldType** → `field:colorpicker` for color selection
+- **NumberFieldType** → `field:slider,min,step,max` for smooth slider controls (e.g., `brightness:slider,0,1,255`)
+- **BooleanFieldType** → `field:uzsuToggle,off,on` for toggle switches (e.g., `auto_play:uzsuToggle,off,on`)
+- **SelectFieldType** → `field:selectnumbers,Option1,Option2,...` for dropdown lists (options with spaces are quoted)
+- **ColorFieldType** → `field:colorpicker` for color selection (e.g., `solid_color:colorpicker`)
+- **Power Field** → Special case: generates simple `on` and `off` commands without widgets
+
+This approach ensures that widgets are properly recognized by fhemWeb and eliminates the need for users to manually configure widget overrides.
 
 ### Status Readings
 
