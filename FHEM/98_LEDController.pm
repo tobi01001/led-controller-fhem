@@ -60,7 +60,6 @@ sub LEDController_ValidateFieldValue($$$);
 sub LEDController_FormatFieldValue($$$);
 sub LEDController_ParseFieldStructure($$);
 sub LEDController_BuildFHEMControls($);
-sub LEDController_BuildWebCmd($);
 sub LEDController_BuildCommandWidget($$);
 sub LEDController_MakeReadingName($);
 sub LEDController_GetStatus($);
@@ -176,7 +175,7 @@ sub LEDController_Set($@) {
         my $helpText = "Unknown argument $cmd, choose one of ";
         
         if(keys %{$hash->{FIELD_STRUCTURE}} > 0) {
-            my @commands = ("refresh");
+            my @commands = ("refresh:noArg");
             
             # Add dynamic commands with widget information, avoid duplicates
             my %seenCommands = ("refresh" => 1);
@@ -214,11 +213,11 @@ sub LEDController_Set($@) {
                 # Special case: for power field, add on/off aliases only once
                 if($fieldType == BooleanFieldType && $fieldName eq "power") {
                     if(!$seenCommands{"on"}) {
-                        push @commands, "on";
+                        push @commands, "on:noArg";
                         $seenCommands{"on"} = 1;
                     }
                     if(!$seenCommands{"off"}) {
-                        push @commands, "off";
+                        push @commands, "off:noArg";
                         $seenCommands{"off"} = 1;
                     }
                 }
@@ -226,7 +225,7 @@ sub LEDController_Set($@) {
             
             $helpText .= join(" ", @commands);
         } else {
-            $helpText .= "refresh";
+            $helpText .= "refresh:noArg";
         }
         
         return $helpText;
@@ -306,11 +305,11 @@ sub LEDController_Get($@) {
     return "Device is disabled" if(AttrVal($name, "disable", 0) == 1);
     
     my $gets = {
-        "status"      => "/status",
-        "allvalues"   => "/allvalues",
-        "structure"   => "/all",
-        "modes"       => "/getmodes",
-        "palettes"    => "/getpals"
+        "status:noArg"      => "/status",
+        "allvalues:noArg"   => "/allvalues",
+        "structure:noArg"   => "/all",
+        "modes:noArg"       => "/getmodes",
+        "palettes:noArg"    => "/getpals"
     };
     
     if($cmd eq "?") {
@@ -888,6 +887,7 @@ sub LEDController_UpdateReadingsFromJSON($$) {
             }
             elsif($fieldType == SelectFieldType && defined($field->{options})) {
                 # If value is already a string option name, convert to processed reading name
+                Log3 $hash->{NAME}, 4, "LEDController - processing select field $key with value $value";
                 if($value !~ /^\d+$/) {
                     # Value is already an option name (like "Ease"), convert to reading name
                     $value = LEDController_MakeReadingName($value);
@@ -1195,14 +1195,7 @@ sub LEDController_BuildFHEMControls($) {
     my ($hash) = @_;
     my $name = $hash->{NAME};
     
-    # Build webCmd attribute for web interface controls
-    my $webCmd = LEDController_BuildWebCmd($hash);
-    if($webCmd) {
-        $attr{$name}{webCmd} = $webCmd;
-        Log3 $name, 4, "LEDController ($name) - built webCmd: $webCmd";
-    }
-    
-    # Set stateFormat for better display
+    # Set stateFormat for better display if not defined
     if(!defined($attr{$name}{stateFormat})) {
         $attr{$name}{stateFormat} = "state";
     }
@@ -1218,88 +1211,6 @@ sub LEDController_BuildFHEMControls($) {
     }
     
     Log3 $name, 3, "LEDController ($name) - FHEM control elements configured";
-}
-
-##############################################################################
-# Build WebCmd Attribute
-##############################################################################
-sub LEDController_BuildWebCmd($) {
-    my ($hash) = @_;
-    my $name = $hash->{NAME};
-    
-    my @webCmds = ();
-    my %seenCommands = ();
-    
-    # Always add refresh command first
-    push @webCmds, "refresh";
-    $seenCommands{"refresh"} = 1;
-    
-    # Process fields in a predictable order
-    my @sortedFields = sort keys %{$hash->{FIELD_STRUCTURE}};
-    
-    foreach my $fieldName (@sortedFields) {
-        my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
-        
-        # Ensure field is a hash reference
-        next unless (ref($field) eq 'HASH');
-        
-        my $fieldType = $field->{type};
-        
-        # Skip non-settable fields
-        next if(!defined($fieldType));
-        next if($fieldType == TitleFieldType || $fieldType == SectionFieldType);
-        
-        # Use original field name as command
-        my $cmdName = $fieldName;
-        
-        # Skip if we've already added this command
-        next if($seenCommands{$cmdName});
-        $seenCommands{$cmdName} = 1;
-        
-        # Build command based on field type
-        if($fieldType == BooleanFieldType) {
-            if($fieldName eq "power") {
-                # For power field, add separate on/off commands
-                if(!$seenCommands{"on"}) {
-                    push @webCmds, "on";
-                    $seenCommands{"on"} = 1;
-                }
-                if(!$seenCommands{"off"}) {
-                    push @webCmds, "off";
-                    $seenCommands{"off"} = 1;
-                }
-            } else {
-                # For other boolean fields, add the field with on/off options
-                push @webCmds, "$cmdName:on,off";
-            }
-        }
-        elsif($fieldType == NumberFieldType) {
-            my $min = $field->{min} || 0;
-            my $max = $field->{max} || 255;
-            push @webCmds, "$cmdName:slider,$min,1,$max";
-        }
-        elsif($fieldType == SelectFieldType) {
-            # Use processed options with proper value,label format for the web command
-            if(defined($field->{processedOptions}) && ref($field->{processedOptions}) eq 'ARRAY') {
-                my @options = @{$field->{processedOptions}};
-                my @formattedOptions = ();
-                
-                for my $i (0..$#options) {
-                    my $option = $options[$i];
-                    push @formattedOptions, $i, $option;
-                }
-                
-                if(@formattedOptions > 0) {
-                    push @webCmds, "$cmdName:" . join(",", @formattedOptions);
-                }
-            }
-        }
-        elsif($fieldType == ColorFieldType) {
-            push @webCmds, "$cmdName:colorpicker,RGB";
-        }
-    }
-    
-    return join(" ", @webCmds);
 }
 
 ##############################################################################
@@ -1328,22 +1239,11 @@ sub LEDController_BuildCommandWidget($$) {
         return "$cmdName:slider,$min,$step,$max";
     }
     elsif($fieldType == SelectFieldType) {
-        # Use processed options for the widget with proper value,label format
+        # Use processed options for the widget with names only  
         if(defined($fieldInfo->{processedOptions}) && ref($fieldInfo->{processedOptions}) eq 'ARRAY') {
             my @options = @{$fieldInfo->{processedOptions}};
-            my @formattedOptions = ();
             
-            for my $i (0..$#options) {
-                my $option = $options[$i];
-                # Quote options with spaces or special characters
-                if($option =~ /[\s,:]/ || $option eq "") {
-                    push @formattedOptions, $i, "\"$option\"";
-                } else {
-                    push @formattedOptions, $i, $option;
-                }
-            }
-            
-            return "$cmdName:selectnumbers," . join(",", @formattedOptions);
+            return "$cmdName:selectnumbers," . join(",", @options);
         }
     }
     elsif($fieldType == ColorFieldType) {
