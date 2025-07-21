@@ -766,7 +766,7 @@ sub LEDController_UpdateReadingsFromJSON($$) {
             my $fieldType = $field->{type};
             
             if($fieldType == BooleanFieldType) {
-                $value = ($value == 1 or $value eq "on") ? "on" : "off";
+                $value = ($value eq "1" or $value eq "on") ? "on" : "off";
             }
             elsif($fieldType == ColorFieldType) {
                 $value = sprintf("%06X", $value) if($value =~ /^\d+$/);
@@ -907,7 +907,7 @@ sub LEDController_ReadWebSocket($) {
     my $bytes_read = sysread($socket, $data, 1024);
     
     if(defined($bytes_read) && $bytes_read > 0) {
-        Log3 $name, 4, "LEDController ($name) - WebSocket data received: $data";
+        Log3 $name, 5, "LEDController ($name) - WebSocket data received: $data";
         
         # Parse WebSocket frames and extract JSON objects
         my @json_objects = LEDController_ParseWebSocketFrame($data);
@@ -920,6 +920,7 @@ sub LEDController_ReadWebSocket($) {
                 Log3 $name, 3, "LEDController ($name) - WebSocket JSON processing error: $@";
             }
         }
+        Log3 $name, 4, "LEDController ($name) - Processed " . scalar(@json_objects) . " JSON objects from WebSocket data";
     } elsif(!defined($bytes_read) && $! != EAGAIN && $! != EWOULDBLOCK) {
         # Connection lost
         readingsSingleUpdate($hash, "websocket_connection", "disconnected", 1);
@@ -1061,6 +1062,7 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
             my $state = $fieldValue eq "on" ? "on" : "off";
             readingsBulkUpdateIfChanged($hash, "state", $state);
         }
+        Log3 $name, 4, "LEDController ($name) - Updated reading $fieldName with value $fieldValue";
     }
     else {
         # Handle other JSON structures
