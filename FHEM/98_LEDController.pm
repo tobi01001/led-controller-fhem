@@ -350,7 +350,7 @@ sub LEDController_ParseResponse($$) {
         return $returnResult ? "Error: $err" : undef;
     }
     
-    Log3 $name, 4, "LEDController ($name) - received response: " . substr($data, 0, 200);
+    Log3 $name, 4, "LEDController ($name) - received response: " . substr($data, 0, 100);
     
     
     
@@ -378,7 +378,7 @@ sub LEDController_ParseResponse($$) {
         return;
     }
 
-    Log3 $name, 4, "LEDController ($name) - parsed JSON response: " . 
+    Log3 $name, 5, "LEDController ($name) - parsed JSON response: " . 
                    (defined($json) ? JSON->new->pretty->encode($json) : "null");
     
     # Update readings based on response
