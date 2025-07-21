@@ -44,11 +44,12 @@ sub LEDController_UpdateReadingsFromWebSocket($$);
 sub LEDController_GetFieldStructure($);
 sub LEDController_BuildDynamicCommands($);
 sub LEDController_ValidateFieldValue($$$);
-sub LEDController_FormatFieldValue($$);
+sub LEDController_FormatFieldValue($$$);
 sub LEDController_ParseFieldStructure($$);
 sub LEDController_BuildFHEMControls($);
 sub LEDController_BuildWebCmd($);
 sub LEDController_BuildCommandWidget($$);
+
 
 ##############################################################################
 # Initialize
@@ -98,6 +99,7 @@ sub LEDController_Define($$) {
     $hash->{FIELD_STRUCTURE} = {};
     $hash->{FIELD_SECTIONS} = [];
     $hash->{DYNAMIC_COMMANDS} = {};
+    $hash->{OPTION_MAPPING} = {};
     
     # Set default attributes
     $attr{$name}{interval} = 30 if(!defined($attr{$name}{interval}));
@@ -204,7 +206,7 @@ sub LEDController_Set($@) {
     return $validationResult if($validationResult);
     
     # Format value for the LED controller
-    my $formattedValue = LEDController_FormatFieldValue($fieldInfo, $value);
+    my $formattedValue = LEDController_FormatFieldValue($hash, $fieldInfo, $value);
     
     # Send command using /set endpoint with query parameters
     my $url = "/set?" . $fieldInfo->{name} . "=" . $formattedValue;
@@ -458,7 +460,12 @@ sub LEDController_ParseFieldStructure($$) {
         # Store field information
         if($fieldName ne "") {
             $field->{section} = $currentSection;
+            # Store field info with both original and sanitized names for lookup
             $hash->{FIELD_STRUCTURE}->{$fieldName} = $field;
+            my $sanitizedFieldName = makeReadingName($fieldName);
+            if($sanitizedFieldName ne $fieldName) {
+                $hash->{FIELD_STRUCTURE}->{$sanitizedFieldName} = $field;
+            }
         }
     }
     
@@ -557,8 +564,8 @@ sub LEDController_ValidateFieldValue($$$) {
 ##############################################################################
 # Format Field Value for LED Controller
 ##############################################################################
-sub LEDController_FormatFieldValue($$) {
-    my ($fieldInfo, $value) = @_;
+sub LEDController_FormatFieldValue($$$) {
+    my ($hash, $fieldInfo, $value) = @_;
     
     my $fieldType = $fieldInfo->{type};
     my $fieldName = $fieldInfo->{name};
@@ -572,6 +579,18 @@ sub LEDController_FormatFieldValue($$) {
         
         return 1 if(!defined($value) || $value eq "on" || $value eq "1");
         return 0;
+    }
+    elsif($fieldType == SelectFieldType) {
+        # For select fields, check if we have an option mapping
+        # and convert the reading name back to the index
+        if(defined($hash->{OPTION_MAPPING}) && defined($hash->{OPTION_MAPPING}->{$fieldName})) {
+            my $mapping = $hash->{OPTION_MAPPING}->{$fieldName};
+            if(defined($mapping->{$value})) {
+                return $mapping->{$value};
+            }
+        }
+        # If no mapping found, try to use value as-is (might be a direct index)
+        return $value;
     }
     elsif($fieldType == ColorFieldType) {
         # Convert hex color to decimal
@@ -605,12 +624,20 @@ sub LEDController_UpdateAllReadings($$) {
             next unless ref($valueItem) eq 'HASH';
             next unless defined($valueItem->{name}) && defined($valueItem->{value});
             
-            my $readingName = $valueItem->{name};
+            my $rawName = $valueItem->{name};
+            my $readingName = makeReadingName($rawName);
             my $readingValue = $valueItem->{value};
             
             # Format reading value based on field type
+            # Check both the sanitized name and original name in field structure
+            my $field;
             if(defined($hash->{FIELD_STRUCTURE}->{$readingName})) {
-                my $field = $hash->{FIELD_STRUCTURE}->{$readingName};
+                $field = $hash->{FIELD_STRUCTURE}->{$readingName};
+            } elsif(defined($hash->{FIELD_STRUCTURE}->{$rawName})) {
+                $field = $hash->{FIELD_STRUCTURE}->{$rawName};
+            }
+            
+            if(defined($field)) {
                 my $fieldType = $field->{type};
                 
                 if($fieldType == BooleanFieldType) {
@@ -627,8 +654,8 @@ sub LEDController_UpdateAllReadings($$) {
             
             readingsBulkUpdate($hash, $readingName, $readingValue);
             
-            # Update STATE based on power reading
-            if($readingName eq "power") {
+            # Update STATE based on power reading (check both sanitized and raw name)
+            if($readingName eq "power" || $rawName eq "power") {
                 my $state = $readingValue eq "on" ? "on" : "off";
                 readingsBulkUpdate($hash, "state", $state);
             }
@@ -646,14 +673,22 @@ sub LEDController_UpdateAllReadings($$) {
 sub LEDController_UpdateReadingsFromJSON($$) {
     my ($hash, $json) = @_;
     
-    foreach my $key (keys %$json) {
-        next if($key eq "state"); # Handle state separately
+    foreach my $rawKey (keys %$json) {
+        next if($rawKey eq "state"); # Handle state separately
         
-        my $value = $json->{$key};
+        my $key = makeReadingName($rawKey);
+        my $value = $json->{$rawKey};
         
         # Format value based on field type if known
+        # Check both the sanitized name and original name in field structure
+        my $field;
         if(defined($hash->{FIELD_STRUCTURE}->{$key})) {
-            my $field = $hash->{FIELD_STRUCTURE}->{$key};
+            $field = $hash->{FIELD_STRUCTURE}->{$key};
+        } elsif(defined($hash->{FIELD_STRUCTURE}->{$rawKey})) {
+            $field = $hash->{FIELD_STRUCTURE}->{$rawKey};
+        }
+        
+        if(defined($field)) {
             my $fieldType = $field->{type};
             
             if($fieldType == BooleanFieldType) {
@@ -666,8 +701,8 @@ sub LEDController_UpdateReadingsFromJSON($$) {
         
         readingsBulkUpdate($hash, $key, $value);
         
-        # Update STATE based on power reading
-        if($key eq "power") {
+        # Update STATE based on power reading (check both sanitized and raw name)
+        if($key eq "power" || $rawKey eq "power") {
             my $state = $value eq "on" ? "on" : "off";
             readingsBulkUpdate($hash, "state", $state);
         }
@@ -872,12 +907,20 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
     
     # Handle WebSocket message format: {"name": "field_name", "value": field_value}
     if(defined($json->{name}) && defined($json->{value})) {
-        my $fieldName = $json->{name};
+        my $rawFieldName = $json->{name};
+        my $fieldName = makeReadingName($rawFieldName);
         my $fieldValue = $json->{value};
         
         # Format value based on field type
+        # Check both the sanitized name and original name in field structure
+        my $field;
         if(defined($hash->{FIELD_STRUCTURE}->{$fieldName})) {
-            my $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
+            $field = $hash->{FIELD_STRUCTURE}->{$fieldName};
+        } elsif(defined($hash->{FIELD_STRUCTURE}->{$rawFieldName})) {
+            $field = $hash->{FIELD_STRUCTURE}->{$rawFieldName};
+        }
+        
+        if(defined($field)) {
             my $fieldType = $field->{type};
             
             if($fieldType == BooleanFieldType) {
@@ -890,8 +933,8 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
         
         readingsBulkUpdate($hash, $fieldName, $fieldValue);
         
-        # Update STATE based on power reading
-        if($fieldName eq "power") {
+        # Update STATE based on power reading (check both sanitized and raw name)
+        if($fieldName eq "power" || $rawFieldName eq "power") {
             my $state = $fieldValue eq "on" ? "on" : "off";
             readingsBulkUpdate($hash, "state", $state);
         }
@@ -981,13 +1024,20 @@ sub LEDController_BuildWebCmd($) {
             
             # If options are available, use them
             if(defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
+                # Store option name to index mapping in hash
+                my %optionMapping = ();
                 for my $i (0..$#{$field->{options}}) {
-                    push @options, "$i," . $field->{options}->[$i];
+                    my $option = $field->{options}->[$i];
+                    my $readingName = makeReadingName($option);
+                    $optionMapping{$readingName} = $i;
+                    push @options, $readingName;
                 }
+                # Store mapping for later use
+                $hash->{OPTION_MAPPING}->{$fieldName} = \%optionMapping;
             } else {
                 # Generate numbered options
                 for my $i (0..$max) {
-                    push @options, "$i,Option$i";
+                    push @options, "Option$i";
                 }
             }
             
@@ -1029,13 +1079,11 @@ sub LEDController_BuildCommandWidget($$) {
     elsif($fieldType == SelectFieldType) {
         if(defined($fieldInfo->{options}) && ref($fieldInfo->{options}) eq 'ARRAY') {
             my @options = @{$fieldInfo->{options}};
-            # Handle whitespace properly by quoting options that contain spaces
+            # Convert options to reading names for the widget
             my @processedOptions = ();
-            for my $i (0 .. $#options) {
-                my $option = $options[$i];
-                # Quote option if it contains spaces
-                $option = '"' . $option . '"' if $option =~ /\s/;
-                push @processedOptions, $option;
+            for my $option (@options) {
+                my $readingName = makeReadingName($option);
+                push @processedOptions, $readingName;
             }
             return "$cmdName:selectnumbers," . join(",", @processedOptions);
         }
@@ -1047,6 +1095,8 @@ sub LEDController_BuildCommandWidget($$) {
     # Default: return command name without widget
     return $cmdName;
 }
+
+
 
 1;
 
