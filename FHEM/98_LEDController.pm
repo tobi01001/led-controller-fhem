@@ -29,6 +29,19 @@ use constant {
     InvalidFieldType => 6
 };
 
+# Default values and limits
+use constant {
+    DEFAULT_PORT     => 80,
+    DEFAULT_INTERVAL => 30,
+    DEFAULT_TIMEOUT  => 5,
+    MIN_INTERVAL     => 1,
+    MAX_INTERVAL     => 3600,
+    MIN_TIMEOUT      => 1,
+    MAX_TIMEOUT      => 60,
+    RETRY_DELAY      => 30,
+    MAX_LOG_LENGTH   => 100
+};
+
 sub LEDController_Initialize($);
 sub LEDController_Define($$);
 sub LEDController_Undef($$);
@@ -49,6 +62,10 @@ sub LEDController_ParseFieldStructure($$);
 sub LEDController_BuildFHEMControls($);
 sub LEDController_BuildWebCmd($);
 sub LEDController_BuildCommandWidget($$);
+sub LEDController_MakeReadingName($);
+sub LEDController_GetStatus($);
+sub LEDController_UpdateAllReadings($$);
+sub LEDController_UpdateReadingsFromJSON($$);
 
 
 ##############################################################################
@@ -158,22 +175,52 @@ sub LEDController_Set($@) {
     if($cmd eq "?") {
         my $helpText = "Unknown argument $cmd, choose one of ";
         
-        if(keys %{$hash->{DYNAMIC_COMMANDS}} > 0) {
+        if(keys %{$hash->{FIELD_STRUCTURE}} > 0) {
             my @commands = ("refresh");
             
-            # Add dynamic commands with widget information
-            foreach my $cmdName (sort keys %{$hash->{DYNAMIC_COMMANDS}}) {
-                my $fieldInfo = $hash->{DYNAMIC_COMMANDS}->{$cmdName};
+            # Add dynamic commands with widget information, avoid duplicates
+            my %seenCommands = ("refresh" => 1);
+            
+            # Process fields in a predictable order
+            my @sortedFields = sort keys %{$hash->{FIELD_STRUCTURE}};
+            
+            foreach my $fieldName (@sortedFields) {
+                my $fieldInfo = $hash->{FIELD_STRUCTURE}->{$fieldName};
                 
                 # Ensure fieldInfo is a hash reference
                 next unless (ref($fieldInfo) eq 'HASH');
                 
                 my $fieldType = $fieldInfo->{type};
                 
+                # Skip non-settable fields
+                next if(!defined($fieldType));
+                next if($fieldType == TitleFieldType || $fieldType == SectionFieldType);
+                
+                # Use original field name as command
+                my $cmdName = $fieldName;
+                
+                # Skip if we've already added this command
+                next if($seenCommands{$cmdName});
+                $seenCommands{$cmdName} = 1;
+                
                 # Build widget definition for this command
                 my $widgetDef = LEDController_BuildCommandWidget($fieldInfo, $cmdName);
-                if($widgetDef) {  # Only add if not empty
+                if($widgetDef && $widgetDef ne $cmdName) {
                     push @commands, $widgetDef;
+                } else {
+                    push @commands, $cmdName;
+                }
+                
+                # Special case: for power field, add on/off aliases only once
+                if($fieldType == BooleanFieldType && $fieldName eq "power") {
+                    if(!$seenCommands{"on"}) {
+                        push @commands, "on";
+                        $seenCommands{"on"} = 1;
+                    }
+                    if(!$seenCommands{"off"}) {
+                        push @commands, "off";
+                        $seenCommands{"off"} = 1;
+                    }
                 }
             }
             
@@ -285,23 +332,44 @@ sub LEDController_Attr(@) {
     my ($cmd, $name, $attrName, $attrVal) = @_;
     my $hash = $defs{$name};
     
+    return "Device $name not found" unless defined($hash);
+    
     if($cmd eq "set") {
         if($attrName eq "interval") {
-            return "interval must be a positive number" if($attrVal !~ /^\d+$/ || $attrVal < 1);
+            return "interval must be a positive number between " . MIN_INTERVAL . " and " . MAX_INTERVAL 
+                if($attrVal !~ /^\d+$/ || $attrVal < MIN_INTERVAL || $attrVal > MAX_INTERVAL);
             # Restart timer with new interval
-            RemoveInternalTimer($hash);
+            RemoveInternalTimer($hash, "LEDController_GetStatus");
             InternalTimer(gettimeofday() + $attrVal, "LEDController_GetStatus", $hash, 0);
         }
         elsif($attrName eq "timeout") {
-            return "timeout must be a positive number" if($attrVal !~ /^\d+$/ || $attrVal < 1);
+            return "timeout must be a positive number between " . MIN_TIMEOUT . " and " . MAX_TIMEOUT
+                if($attrVal !~ /^\d+$/ || $attrVal < MIN_TIMEOUT || $attrVal > MAX_TIMEOUT);
         }
         elsif($attrName eq "websocket") {
+            return "websocket must be 0 or 1" if($attrVal !~ /^[01]$/);
             if($attrVal == 1) {
                 LEDController_ConnectWebSocket($hash);
             } elsif($attrVal == 0 && defined($hash->{WEBSOCKET})) {
                 close($hash->{WEBSOCKET});
                 delete $hash->{WEBSOCKET};
                 readingsSingleUpdate($hash, "websocket_connection", "disconnected", 1);
+            }
+        }
+        elsif($attrName eq "disable") {
+            return "disable must be 0 or 1" if($attrVal !~ /^[01]$/);
+            if($attrVal == 1) {
+                # Stop all timers when disabled
+                RemoveInternalTimer($hash);
+                if(defined($hash->{WEBSOCKET})) {
+                    close($hash->{WEBSOCKET});
+                    delete $hash->{WEBSOCKET};
+                }
+                readingsSingleUpdate($hash, "state", "disabled", 1);
+            } else {
+                # Re-enable: restart status updates
+                $hash->{STATE} = "active";
+                InternalTimer(gettimeofday() + 5, "LEDController_GetStatus", $hash, 0);
             }
         }
     }
@@ -347,12 +415,28 @@ sub LEDController_ParseResponse($$) {
     if($err ne "") {
         Log3 $name, 2, "LEDController ($name) - error: $err";
         readingsSingleUpdate($hash, "state", "error", 1);
+        
+        # Schedule retry for critical endpoints
+        my $url = $param->{url} || "";
+        if($url =~ /(\/all|\/status)$/) {
+            my $retryDelay = 30; # Retry after 30 seconds
+            Log3 $name, 3, "LEDController ($name) - scheduling retry in ${retryDelay}s for $url";
+            InternalTimer(gettimeofday() + $retryDelay, 
+                         $url =~ /\/all$/ ? "LEDController_GetFieldStructure" : "LEDController_GetStatus", 
+                         $hash, 0);
+        }
+        
         return $returnResult ? "Error: $err" : undef;
     }
     
+    # Validate response data
+    if(!defined($data) || $data eq "") {
+        Log3 $name, 2, "LEDController ($name) - empty response received";
+        readingsSingleUpdate($hash, "state", "error", 1);
+        return $returnResult ? "Error: empty response" : undef;
+    }
+    
     Log3 $name, 4, "LEDController ($name) - received response: " . substr($data, 0, 100);
-    
-    
     
     # Handle different response types
     my $url = $param->{url};
@@ -375,7 +459,9 @@ sub LEDController_ParseResponse($$) {
     
     if($@) {
         Log3 $name, 3, "LEDController ($name) - invalid JSON response: " . substr($data, 0, 100);
-        return;
+        Log3 $name, 4, "LEDController ($name) - JSON parse error: $@";
+        # Don't treat this as a fatal error, device might still be functional
+        return $returnResult ? "Error: Invalid JSON response" : undef;
     }
 
     Log3 $name, 5, "LEDController ($name) - parsed JSON response: " . 
@@ -392,7 +478,7 @@ sub LEDController_ParseResponse($$) {
     # Handle Stats section if present
     if(defined($json->{Stats})) {
         foreach my $key (keys %{$json->{Stats}}) {
-            my $readingName = "stats_" . makeReadingName($key);
+            my $readingName = "stats_" . LEDController_MakeReadingName($key);
             my $value = $json->{Stats}->{$key};
             
             # Format specific stats values
@@ -416,7 +502,7 @@ sub LEDController_ParseResponse($$) {
     # Handle sunRiseState section if present
     if(defined($json->{sunRiseState})) {
         foreach my $key (keys %{$json->{sunRiseState}}) {
-            my $readingName = "sunrise_" . makeReadingName($key);
+            my $readingName = "sunrise_" . LEDController_MakeReadingName($key);
             my $value = $json->{sunRiseState}->{$key};
             
             # Format boolean values
@@ -444,6 +530,8 @@ sub LEDController_ParseResponse($$) {
         my $interval = AttrVal($name, "interval", 30);
         InternalTimer(gettimeofday() + $interval, "LEDController_GetStatus", $hash, 0);
     }
+    
+    return $returnResult ? $data : undef;
 }
 
 ##############################################################################
@@ -489,6 +577,15 @@ sub LEDController_ParseFieldStructure($$) {
     if($@) {
         Log3 $name, 2, "LEDController ($name) - error parsing field structure: $@";
         $hash->{STATE} = "Error parsing structure";
+        # Schedule retry in 60 seconds
+        InternalTimer(gettimeofday() + 60, "LEDController_GetFieldStructure", $hash, 0);
+        return;
+    }
+    
+    # Validate that we got an array
+    if(!defined($fields) || ref($fields) ne 'ARRAY') {
+        Log3 $name, 2, "LEDController ($name) - invalid field structure format (expected array)";
+        $hash->{STATE} = "Error: invalid structure format";
         return;
     }
     
@@ -498,12 +595,19 @@ sub LEDController_ParseFieldStructure($$) {
     
     my $currentSection = "default";
     my @sections = ();
+    my $fieldCount = 0;
     
     foreach my $field (@$fields) {
         next unless ref($field) eq 'HASH';
         
         my $fieldName = $field->{name} || "";
         my $fieldType = $field->{type};
+        
+        # Validate field has required properties
+        if($fieldName eq "" || !defined($fieldType)) {
+            Log3 $name, 4, "LEDController ($name) - skipping invalid field: missing name or type";
+            next;
+        }
         
         # Track sections
         if(defined($fieldType) && $fieldType == SectionFieldType) {
@@ -522,14 +626,17 @@ sub LEDController_ParseFieldStructure($$) {
         if($fieldName ne "") {
             $field->{section} = $currentSection;
             
-            # For SelectFieldType, process options with makeReadingName for display
+            # For SelectFieldType, process options with LEDController_MakeReadingName for display
             if($fieldType == SelectFieldType && defined($field->{options}) && ref($field->{options}) eq 'ARRAY') {
                 my @processedOptions = ();
                 my %optionMapping = ();
                 
                 for my $i (0..$#{$field->{options}}) {
                     my $option = $field->{options}->[$i];
-                    my $readingName = makeReadingName($option);
+                    # Validate option is defined
+                    next unless defined($option);
+                    
+                    my $readingName = LEDController_MakeReadingName($option);
                     push @processedOptions, $readingName;
                     $optionMapping{$readingName} = $i;
                 }
@@ -541,10 +648,18 @@ sub LEDController_ParseFieldStructure($$) {
             
             # Store field with original name only
             $hash->{FIELD_STRUCTURE}->{$fieldName} = $field;
+            $fieldCount++;
         }
     }
     
     $hash->{FIELD_SECTIONS} = \@sections;
+    
+    # Validate we got some fields
+    if($fieldCount == 0) {
+        Log3 $name, 2, "LEDController ($name) - no valid fields found in structure";
+        $hash->{STATE} = "Error: no valid fields";
+        return;
+    }
     
     # Build dynamic commands
     LEDController_BuildDynamicCommands($hash);
@@ -556,8 +671,7 @@ sub LEDController_ParseFieldStructure($$) {
     $hash->{STATE} = "active";
     InternalTimer(gettimeofday() + 5, "LEDController_GetStatus", $hash, 0);
     
-    Log3 $name, 3, "LEDController ($name) - field structure loaded with " . 
-                   scalar(keys %{$hash->{FIELD_STRUCTURE}}) . " fields";
+    Log3 $name, 3, "LEDController ($name) - field structure loaded with $fieldCount fields";
 }
 
 ##############################################################################
@@ -588,6 +702,7 @@ sub LEDController_BuildDynamicCommands($) {
         $hash->{DYNAMIC_COMMANDS}->{$cmdName} = $field;
         
         # Special case: Create on/off aliases for power field only
+        # These are stored separately to avoid duplication in help text
         if($fieldType == BooleanFieldType && $fieldName eq "power") {
             $hash->{DYNAMIC_COMMANDS}->{"on"} = $field;
             $hash->{DYNAMIC_COMMANDS}->{"off"} = $field;
@@ -700,7 +815,7 @@ sub LEDController_UpdateAllReadings($$) {
             next unless defined($valueItem->{name}) && defined($valueItem->{value});
             
             my $fieldName = $valueItem->{name};
-            my $readingName = makeReadingName($fieldName);
+            my $readingName = LEDController_MakeReadingName($fieldName);
             my $readingValue = $valueItem->{value};
             
             # Format reading value based on field type if field structure is available
@@ -716,12 +831,12 @@ sub LEDController_UpdateAllReadings($$) {
                     # If value is already a string option name, convert to processed reading name
                     if($readingValue !~ /^\d+$/) {
                         # Value is already an option name, convert to reading name
-                        $readingValue = makeReadingName($readingValue);
+                        $readingValue = LEDController_MakeReadingName($readingValue);
                     } else {
                         # Value is an index, convert to option name then to reading name
                         if($readingValue < scalar(@{$field->{options}})) {
                             my $optionName = $field->{options}->[$readingValue];
-                            $readingValue = makeReadingName($optionName);
+                            $readingValue = LEDController_MakeReadingName($optionName);
                         }
                     }
                 }
@@ -753,7 +868,7 @@ sub LEDController_UpdateReadingsFromJSON($$) {
     
     foreach my $rawKey (keys %$json) {
         
-        my $key = makeReadingName($rawKey);
+        my $key = LEDController_MakeReadingName($rawKey);
         my $value = $json->{$rawKey};
         
         # Format value based on field type if known
@@ -775,12 +890,12 @@ sub LEDController_UpdateReadingsFromJSON($$) {
                 # If value is already a string option name, convert to processed reading name
                 if($value !~ /^\d+$/) {
                     # Value is already an option name (like "Ease"), convert to reading name
-                    $value = makeReadingName($value);
+                    $value = LEDController_MakeReadingName($value);
                 } else {
                     # Value is an index, convert to option name then to reading name
                     if($value < scalar(@{$field->{options}})) {
                         my $optionName = $field->{options}->[$value];
-                        $value = makeReadingName($optionName);
+                        $value = LEDController_MakeReadingName($optionName);
                     }
                 }
             }
@@ -1025,7 +1140,7 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
     # Handle WebSocket message format: {"name": "field_name", "value": field_value}
     if(defined($json->{name}) && defined($json->{value})) {
         my $rawFieldName = $json->{name};
-        my $fieldName = makeReadingName($rawFieldName);
+        my $fieldName = LEDController_MakeReadingName($rawFieldName);
         my $fieldValue = $json->{value};
         
         # Format value based on field type
@@ -1044,12 +1159,12 @@ sub LEDController_UpdateReadingsFromWebSocket($$) {
                 # If value is already a string option name, convert to processed reading name
                 if($fieldValue !~ /^\d+$/) {
                     # Value is already an option name, convert to reading name
-                    $fieldValue = makeReadingName($fieldValue);
+                    $fieldValue = LEDController_MakeReadingName($fieldValue);
                 } else {
                     # Value is an index, convert to option name then to reading name
                     if($fieldValue < scalar(@{$field->{options}})) {
                         my $optionName = $field->{options}->[$fieldValue];
-                        $fieldValue = makeReadingName($optionName);
+                        $fieldValue = LEDController_MakeReadingName($optionName);
                     }
                 }
             }
@@ -1080,6 +1195,29 @@ sub LEDController_BuildFHEMControls($) {
     my ($hash) = @_;
     my $name = $hash->{NAME};
     
+    # Build webCmd attribute for web interface controls
+    my $webCmd = LEDController_BuildWebCmd($hash);
+    if($webCmd) {
+        $attr{$name}{webCmd} = $webCmd;
+        Log3 $name, 4, "LEDController ($name) - built webCmd: $webCmd";
+    }
+    
+    # Set stateFormat for better display
+    if(!defined($attr{$name}{stateFormat})) {
+        $attr{$name}{stateFormat} = "state";
+    }
+    
+    # Set icon if not defined
+    if(!defined($attr{$name}{icon})) {
+        $attr{$name}{icon} = "light_led_stripe";
+    }
+    
+    # Set room if not defined  
+    if(!defined($attr{$name}{room})) {
+        $attr{$name}{room} = "LED";
+    }
+    
+    Log3 $name, 3, "LEDController ($name) - FHEM control elements configured";
 }
 
 ##############################################################################
@@ -1090,9 +1228,11 @@ sub LEDController_BuildWebCmd($) {
     my $name = $hash->{NAME};
     
     my @webCmds = ();
+    my %seenCommands = ();
     
-    # Always add refresh command
+    # Always add refresh command first
     push @webCmds, "refresh";
+    $seenCommands{"refresh"} = 1;
     
     # Process fields in a predictable order
     my @sortedFields = sort keys %{$hash->{FIELD_STRUCTURE}};
@@ -1112,10 +1252,26 @@ sub LEDController_BuildWebCmd($) {
         # Use original field name as command
         my $cmdName = $fieldName;
         
+        # Skip if we've already added this command
+        next if($seenCommands{$cmdName});
+        $seenCommands{$cmdName} = 1;
+        
         # Build command based on field type
         if($fieldType == BooleanFieldType) {
-            # For other boolean fields, add the field with on/off options
-            push @webCmds, "$cmdName:on,off";
+            if($fieldName eq "power") {
+                # For power field, add separate on/off commands
+                if(!$seenCommands{"on"}) {
+                    push @webCmds, "on";
+                    $seenCommands{"on"} = 1;
+                }
+                if(!$seenCommands{"off"}) {
+                    push @webCmds, "off";
+                    $seenCommands{"off"} = 1;
+                }
+            } else {
+                # For other boolean fields, add the field with on/off options
+                push @webCmds, "$cmdName:on,off";
+            }
         }
         elsif($fieldType == NumberFieldType) {
             my $min = $field->{min} || 0;
@@ -1123,11 +1279,18 @@ sub LEDController_BuildWebCmd($) {
             push @webCmds, "$cmdName:slider,$min,1,$max";
         }
         elsif($fieldType == SelectFieldType) {
-            # Use processed options for the web command
+            # Use processed options with proper value,label format for the web command
             if(defined($field->{processedOptions}) && ref($field->{processedOptions}) eq 'ARRAY') {
                 my @options = @{$field->{processedOptions}};
-                if(@options > 0) {
-                    push @webCmds, "$cmdName:" . join(",", @options);
+                my @formattedOptions = ();
+                
+                for my $i (0..$#options) {
+                    my $option = $options[$i];
+                    push @formattedOptions, $i, $option;
+                }
+                
+                if(@formattedOptions > 0) {
+                    push @webCmds, "$cmdName:" . join(",", @formattedOptions);
                 }
             }
         }
@@ -1152,7 +1315,10 @@ sub LEDController_BuildCommandWidget($$) {
     
     # For boolean fields, handle special cases
     if($fieldType == BooleanFieldType) {
-        
+        # For power field, don't add widget (handled by on/off commands)
+        if($fieldInfo->{name} eq "power") {
+            return $cmdName;
+        }
         return "$cmdName:uzsuToggle,off,on";
     }
     elsif($fieldType == NumberFieldType) {
@@ -1162,10 +1328,22 @@ sub LEDController_BuildCommandWidget($$) {
         return "$cmdName:slider,$min,$step,$max";
     }
     elsif($fieldType == SelectFieldType) {
-        # Use processed options for the widget
+        # Use processed options for the widget with proper value,label format
         if(defined($fieldInfo->{processedOptions}) && ref($fieldInfo->{processedOptions}) eq 'ARRAY') {
             my @options = @{$fieldInfo->{processedOptions}};
-            return "$cmdName:selectnumbers," . join(",", @options);
+            my @formattedOptions = ();
+            
+            for my $i (0..$#options) {
+                my $option = $options[$i];
+                # Quote options with spaces or special characters
+                if($option =~ /[\s,:]/ || $option eq "") {
+                    push @formattedOptions, $i, "\"$option\"";
+                } else {
+                    push @formattedOptions, $i, $option;
+                }
+            }
+            
+            return "$cmdName:selectnumbers," . join(",", @formattedOptions);
         }
     }
     elsif($fieldType == ColorFieldType) {
@@ -1176,6 +1354,25 @@ sub LEDController_BuildCommandWidget($$) {
     return $cmdName;
 }
 
+##############################################################################
+# Helper function to make reading names FHEM-compatible
+##############################################################################
+sub LEDController_MakeReadingName($) {
+    my ($name) = @_;
+    return "" unless defined($name);
+    
+    # Use FHEM's makeReadingName if available, otherwise implement basic version
+    if(defined(&main::makeReadingName)) {
+        return main::makeReadingName($name);
+    } else {
+        # Basic implementation: convert to lowercase, replace non-alphanumeric with underscore
+        $name = lc($name);
+        $name =~ s/[^a-z0-9_]/_/g;
+        $name =~ s/_+/_/g;  # Collapse multiple underscores
+        $name =~ s/^_|_$//g; # Remove leading/trailing underscores
+        return $name || "unknown";
+    }
+}
 
 
 1;
