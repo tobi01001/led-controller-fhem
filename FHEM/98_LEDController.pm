@@ -1226,10 +1226,6 @@ sub LEDController_BuildCommandWidget($$) {
     
     # For boolean fields, handle special cases
     if($fieldType == BooleanFieldType) {
-        # For power field, don't add widget (handled by on/off commands)
-        if($fieldInfo->{name} eq "power") {
-            return $cmdName;
-        }
         return "$cmdName:uzsuToggle,off,on";
     }
     elsif($fieldType == NumberFieldType) {
